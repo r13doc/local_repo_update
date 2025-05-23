@@ -49,8 +49,8 @@ async fn main() {
     write_logs(d).await;
     
     // path for works with 
-    //let path = current_dir().unwrap();
-    let path = Path::new("/home/den/venv/STUDY/").to_path_buf();
+    let path = current_dir().unwrap();
+    
     
     let main_path = read_dir(path)
         .expect("missing directory")

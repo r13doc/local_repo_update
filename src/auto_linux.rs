@@ -27,16 +27,6 @@ impl UpdateMarker {
     pub fn create(&self, exec_path: &PathBuf) {
 
         let exec_path = exec_path.to_str().expect("error with exec_path");
-        //name_file.iter().last();
-        // let mut autosave_file = home_dir()
-        //     .expect("should be home dir")
-        //     .join(".config")
-        //     .join("autostart")
-        //     .join("some_name");
-        // 
-        // autosave_file.set_extension("desktop");
-        // let name2 = env!("CARGO_PKG_NAME");
-        // println!("cargo name {:?}", *CONFIG_PATH);
         let autosave_file = &*CONFIG_PATH;
         let file = autosave_file.to_str().unwrap();
         let name_pkg = env!("CARGO_PKG_NAME");
@@ -88,12 +78,6 @@ mod tests {
         let exist = update_mark.is_exist().expect("exist!!");
         assert!(!exist);
     }
-    
-    // #[test]
-    // fn dirs() {
-    //     let log_dir = &*LOG_FILE;
-    //     println!("{:?}", log_dir);
-    // }
 }
 
 

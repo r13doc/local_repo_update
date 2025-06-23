@@ -3,56 +3,38 @@ use auto_linux::UpdateMarker as upd_marker;
 
 use std::env::{current_dir, home_dir};
 use std::fs::{self, read_dir};
-use std::io::{BufRead, BufReader,Write};
+use std::io::{BufRead, BufReader, Error, Write};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use std::str::from_utf8;
 use std::sync::LazyLock;
+use std::time::Duration;
 use chrono::{Local, NaiveDate};
 
+// main path where located all git_code subfolders
+const MAIN_PATH: &str = "..";
 
 static LOG_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
-    let mut dir = current_dir()
-        .expect("should be log dir")
+    let mut dir = MAIN_PATH.parse::<PathBuf>()
+        .expect("error with main path")
         .join(env!("CARGO_PKG_NAME"));
     dir.set_extension("log");
     dir
 });
 
 static CURRENT_EXEC_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    // path for works with
-    let path = current_dir().unwrap().join(env!("CARGO_PKG_NAME"));
-    //
+    let path = MAIN_PATH.parse::<PathBuf>()
+        .expect("error exec path")
+        .join(env!("CARGO_PKG_NAME"));
+    
     path
 });
 
 
 
-// create collection paths with nested dirs -> local repository
-fn dirs(path: &PathBuf) -> Vec<PathBuf> {
-    let main_path = read_dir(path)
-        .expect("missing directory")
-        .map(|res|res.map(|f| f.path()))
-        .collect::<Vec<_>>();
-
-    let mut nested_dirs = vec![];
-    for i in main_path {
-        let res = match &i {
-            Ok(i) if !i.is_dir() => {continue},
-            _ => {i.unwrap()}
-        };
-
-        for dir in read_dir(res).unwrap() {
-            nested_dirs.push(dir.unwrap().path())
-        }
-    }
-    nested_dirs
-}
-
 async fn write_logs(data: &[u8]) {
     let log_file = &*LOG_FILE;
     let _ = fs::File::options()
-        //.write(true)
         .append(true)
         .open(log_file)
         .expect("error log writes")
@@ -65,17 +47,43 @@ struct UpdLocGit {
     nested_dirs: Vec<PathBuf>,
 }
 
+
+impl UpdLocGit {
+    // create collection paths with nested dirs -> local repository
+    // main folder -> subfolders with code base organized by topics
+    fn dirs(path: &PathBuf) -> Vec<PathBuf> {
+        let main_path = read_dir(path)
+            .expect("missing directory")
+            .map(|res|res.map(|f| f.path()))
+            .collect::<Vec<_>>();
+
+        let mut nested_dirs = vec![];
+        for i in main_path {
+            let res = match &i {
+                Ok(i) if !i.is_dir() => {continue},
+                _ => {i.unwrap()}
+            };
+
+            for dir in read_dir(res).unwrap() {
+                nested_dirs.push(dir.unwrap().path())
+            }
+        }
+        nested_dirs
+    }
+    
+}
+
 impl UpdLocGit {
     async fn init() -> Self {
         // path for works with
-        let path = current_dir().unwrap();
-        //
-        let nested_dirs = dirs(&path);
+        let path = MAIN_PATH.parse::<PathBuf>().expect("error in init path");
+        let nested_dirs = UpdLocGit::dirs(&path);
         Self {
             nested_dirs,
         }
     }
-    async fn check_interval(&self,) -> Option<bool> {
+    
+    fn date_interval(&self,) -> Result<(String, String), Error> {
         let log_file = &*LOG_FILE;
         assert!(log_file.exists(), "log file don't exist");
         
@@ -85,34 +93,35 @@ impl UpdLocGit {
         let mut  old_date = String::new();
         let mut interval = String::new();
         for i in buf_reader.lines() {
-            match i.unwrap() {
-                e if e.contains("20") => {
-                    let date= e.split_at(10).0;
-                    old_date.push_str(date);//.expect("error when write from log_file date");
-                }
-                e if e.contains("update") => {
-                    let inter = e.split_at(21).1;
-                    interval.push_str(inter);//.expect("error when write from log_file interval");
-                }
-                _ => {}
+            let i = i?;
+            if i.contains("20") {
+                let date:Vec<_> = i.split(" ").collect();
+                let date = date[0];
+                old_date.push_str(date);
+            }
+            if i.contains("update_interval_days") {
+                let inter = i.split("=").last().expect("should be number");
+                interval.push_str(inter);
             }
         };
-        
+        Ok((old_date, interval))
+    }
+    async fn check_interval(&self) -> Option<bool> {
+        let(old_date, interval) = self.date_interval().expect("error old_date interval in check_interval");
         // if interval from log file is 0 or "" return None
-        if interval.contains("0") | interval.is_empty() {
+        if interval.eq("0") | interval.is_empty() {
             // remove autoupdate from config file
             upd_marker.remove();
             return None;
         }
-        
         let exec_path_marker = &*CURRENT_EXEC_PATH;
         if !upd_marker.is_exist()
             .expect("error checking existing marker") { 
             upd_marker.create(exec_path_marker)
         }
-        
         // parse old date from log file
         let interval = interval.parse::<i64>().expect("parse interval to i64");
+
         let old_date = old_date
             .parse::<NaiveDate>()
             .expect("error parsing old date");
@@ -122,7 +131,6 @@ impl UpdLocGit {
             .parse::<NaiveDate>()
             .expect("problem parsing current date");
         let past_days = current_date.signed_duration_since(old_date).num_days();
-        
         // check conditions
         if past_days > interval {
             Some(true)
@@ -134,6 +142,7 @@ impl UpdLocGit {
         time.push('\n');
         time
     }
+    
     fn create_log_file(&self) {
         let log_file = &*LOG_FILE.as_path();
         fs::File::create(log_file)
@@ -148,6 +157,7 @@ impl UpdLocGit {
             .await
             .expect("prob with clear log");
     }
+    
     async fn tasks(self) {
         let git_pull = async move |dir: PathBuf| Command::new("git")
             .current_dir(dir)
@@ -173,78 +183,43 @@ impl UpdLocGit {
         // create all our task for parallel execution
         let mut tasks = Vec::with_capacity(self.nested_dirs.len());
         for i in self.nested_dirs {
-            tasks.push(tokio::spawn(async move {
-                let out = git_url(i.clone()).await;
-                // check if our repository are exists
-                if !out.status.success() {
-                    let path = i.to_str().unwrap().as_bytes();
-                    write_logs([path, b" -> ", out.stderr.as_slice()].concat().as_slice()).await;
-                } else {
-                    // pull request to update
-                    let pull = git_pull(i.clone()).await;
-
-                    //tokio::time::sleep(Duration::from_secs(10)).await;
-                    let da = pull.stdout.as_slice();
-
-                    let result = from_utf8(da)
-                        .unwrap()
-                        .lines()
-                        .find(|l| l.contains("Получение обьектов")
-                            | l.contains("Уже актуально")
-                            | l.contains("error") | l.contains("Обновление"));
-
-                    match result {
-                        Some(a) if a.contains("Уже актуально") => {
-                            let data = result.unwrap().as_bytes();
+            let out = git_url(i.clone()).await;
+            // check if our repository are exists
+            if !out.status.success() {
+                let path = i.to_str().unwrap().as_bytes();
+                write_logs([path, b" -> ", out.stderr.as_slice()].concat().as_slice()).await;
+                let empty = tokio::spawn(async { });
+                tasks.push(empty);
+            } else {
+                let task = tokio::spawn(async move {
+                    loop {
+                        // pull request to update
+                        let pull = git_pull(i.clone()).await;
+                        let da = pull.stdout.as_slice();
+                        let res = from_utf8(da)
+                            .expect("data reading error")
+                            .lines()
+                            .find(|l| l.contains("Уже актуально") | l.contains("error"));
+                        
+                        if res.is_none() {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        if res.unwrap().contains("Уже актуально") {
+                            let data = "Актуально ".as_bytes();
+                            write_logs([data, b" -> ", out.stdout.as_slice()].concat().as_slice()).await;
+                            break
+                        }
+                        if res.unwrap().contains("error") {
+                            let data = "error".as_bytes();
                             write_logs([data, b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
+                            break;
                         }
-                        Some(a) if a.contains("Получение обьектов") => {
-                            let data = result.unwrap().as_bytes();
-                            write_logs([data, b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
-                        }
-                        Some(a) if a.contains("error") => {
-                            let data = result.unwrap().as_bytes();
-                            write_logs([data, b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
-                        }
-                        Some(a) if a.contains("Обновление") => {
-                            let data = result.unwrap().as_bytes();
-                            write_logs([data, b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
-                        }
-
-                        None => {
-                            // if problems with update repo run stash - pull
-                            git_stash(i.clone()).await;
-                            let pull  = git_pull(i.clone()).await;
-                            let da = pull.stdout.as_slice();
-
-                            let result = from_utf8(da)
-                                .unwrap()
-                                .lines()
-                                .find(|l| l.contains("Получение обьектов")
-                                    | l.contains("Уже актуально")
-                                    | l.contains("error") | l.contains(""));
-
-                            // problem with update local repo error will send to log file
-                            if result.is_none() {
-                                let res = pull.stderr.as_slice();
-                                let result = res
-                                    .lines()
-                                    .find(|l| l.as_ref().unwrap().contains("."))
-                                    .unwrap();
-
-                                let data = result.unwrap();
-                                write_logs([data.as_bytes(), b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
-                                // remove folder, create new local from remote repo
-
-                            } else {
-                                let data = result.unwrap().as_bytes();
-                                write_logs([data, b" -> ",out.stdout.as_slice()].concat().as_slice()).await;
-                            }
-                        }
-                        _ => {}
                     }
-                }
-            }));
+                });
+                tasks.push(task);
+                
+            };
         }
         let mut outputs = Vec::with_capacity(tasks.len());
         for task in tasks {
@@ -271,22 +246,24 @@ async fn main() {
         let _ = update.tasks().await;
     } else { 
         let check_interval = update.check_interval().await;
-        match check_interval {
-            Some(t) if t.eq(&true) => {
+        if check_interval.is_some() {
+            if check_interval.unwrap() {
+                let (_, interval) = update.date_interval().expect("check_interval in main error");
+                let log_interval = ["update_interval_days=", interval.as_str(), "\n"].concat();
                 update.clear_log_file().await;
                 write_logs(update.time_now().as_bytes()).await;
-                write_logs(interval).await;
+                write_logs(log_interval.as_bytes()).await;
                 let _ = update.tasks().await;
+            } else { 
+                return;
             }
-            Some(t) if t.eq(&false) => {}
-            _ => {
-                // local git updates when we run file
-                let none_interval = "update_interval_days=0\n".as_bytes();
-                update.clear_log_file().await;
-                write_logs(update.time_now().as_bytes()).await;
-                write_logs(none_interval).await;
-                let _ = update.tasks().await;
-            }
+        } else {
+            // local git updates when we run file
+            let none_interval = "update_interval_days=0\n".as_bytes();
+            update.clear_log_file().await;
+            write_logs(update.time_now().as_bytes()).await;
+            write_logs(none_interval).await;
+            let _ = update.tasks().await;
         }
     }
     
@@ -295,7 +272,6 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-    use tokio::net::UdpSocket;
     use super::*;
     #[tokio::test]
     async fn log_dir() {

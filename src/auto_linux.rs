@@ -22,7 +22,7 @@ pub struct UpdateMarker;
 
 impl UpdateMarker {
     pub fn init() -> Self {
-        Self
+        Self {}
     }
     pub fn create(&self, exec_path: &PathBuf) {
 
